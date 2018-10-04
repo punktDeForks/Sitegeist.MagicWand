@@ -9,13 +9,13 @@ namespace Sitegeist\MagicWand\Command;
 use Neos\Flow\Annotations as Flow;
 use Neos\Utility\Arrays;
 use Neos\Flow\Core\Bootstrap;
+use Sitegeist\MagicWand\DBAL\SimpleDBAL;
 
 /**
  * @Flow\Scope("singleton")
  */
 class CloneCommandController extends AbstractCommandController
 {
-
     /**
      * @Flow\Inject
      * @var Bootstrap
@@ -27,6 +27,12 @@ class CloneCommandController extends AbstractCommandController
      * @Flow\InjectConfiguration("clonePresets")
      */
     protected $clonePresets;
+
+    /**
+     * @Flow\Inject
+     * @var SimpleDBAL
+     */
+    protected $dbal;
 
     /**
      * Show the list of predefined clone configurations
@@ -196,11 +202,11 @@ class CloneCommandController extends AbstractCommandController
         ################################################
 
         if (!isset($remotePersistenceConfiguration['port'])) {
-            $remotePersistenceConfiguration['port'] = 3306;
+            $remotePersistenceConfiguration['port'] = $this->dbal->getDefaultPort($remotePersistenceConfiguration['driver']);
         }
 
         if (!isset($this->databaseConfiguration['port'])) {
-            $this->databaseConfiguration['port'] = 3306;
+            $this->databaseConfiguration['port'] = $this->dbal->getDefaultPort($this->databaseConfiguration['driver']);
         }
 
         ########################
@@ -210,20 +216,20 @@ class CloneCommandController extends AbstractCommandController
         if ($keepDb == false) {
             $this->outputHeadLine('Drop and Recreate DB');
 
-            $emptyLocalDbSql = 'DROP DATABASE `'
-                . $this->databaseConfiguration['dbname']
-                . '`; CREATE DATABASE `'
-                . $this->databaseConfiguration['dbname']
-                . '` collate utf8_unicode_ci;';
+            $emptyLocalDbSql = $this->dbal->flushDbSql($this->databaseConfiguration['driver'], $this->databaseConfiguration['dbname']);
 
             $this->executeLocalShellCommand(
-                'echo %s | mysql --host=\'%s\' --port=\'%s\' --user=\'%s\' --password=\'%s\'',
+                'echo %s | %s',
                 [
                     escapeshellarg($emptyLocalDbSql),
-                    $this->databaseConfiguration['host'],
-                    $this->databaseConfiguration['port'],
-                    $this->databaseConfiguration['user'],
-                    $this->databaseConfiguration['password']
+                    $this->dbal->buildCmd(
+                        $this->databaseConfiguration['driver'],
+                        $this->databaseConfiguration['host'],
+                        (int)$this->databaseConfiguration['port'],
+                        $this->databaseConfiguration['user'],
+                        $this->databaseConfiguration['password'],
+                        $this->databaseConfiguration['dbname']
+                    )
                 ]
             );
         } else {
@@ -236,22 +242,28 @@ class CloneCommandController extends AbstractCommandController
 
         $this->outputHeadLine('Transfer Database');
         $this->executeLocalShellCommand(
-            'ssh -p %s %s %s@%s \'mysqldump --add-drop-table --host=\'"\'"\'%s\'"\'"\' --port=\'"\'"\'%d\'"\'"\' --user=\'"\'"\'%s\'"\'"\' --password=\'"\'"\'%s\'"\'"\' \'"\'"\'%s\'"\'"\'\' | mysql --host=\'%s\' --port=\'%s\' --user=\'%s\' --password=\'%s\' \'%s\'',
+            'ssh -p %s %s %s@%s -- %s | %s',
             [
                 $port,
                 $sshOptions,
                 $user,
                 $host,
-                $remotePersistenceConfiguration['host'],
-                $remotePersistenceConfiguration['port'],
-                $remotePersistenceConfiguration['user'],
-                $remotePersistenceConfiguration['password'],
-                $remotePersistenceConfiguration['dbname'],
-                $this->databaseConfiguration['host'],
-                $this->databaseConfiguration['port'],
-                $this->databaseConfiguration['user'],
-                $this->databaseConfiguration['password'],
-                $this->databaseConfiguration['dbname']
+                $this->dbal->buildDumpCmd(
+                    $remotePersistenceConfiguration['driver'],
+                    $remotePersistenceConfiguration['host'],
+                    (int)$remotePersistenceConfiguration['port'],
+                    $remotePersistenceConfiguration['user'],
+                    $remotePersistenceConfiguration['password'],
+                    $remotePersistenceConfiguration['dbname']
+                ),
+                $this->dbal->buildCmd(
+                    $this->databaseConfiguration['driver'],
+                    $this->databaseConfiguration['host'],
+                    (int)$this->databaseConfiguration['port'],
+                    $this->databaseConfiguration['user'],
+                    $this->databaseConfiguration['password'],
+                    $this->databaseConfiguration['dbname']
+                )
             ]
         );
 
@@ -363,13 +375,16 @@ class CloneCommandController extends AbstractCommandController
     protected function checkConfiguration($remotePersistenceConfiguration)
     {
         $this->outputHeadLine('Check Configuration');
-        if ($remotePersistenceConfiguration['driver'] != 'pdo_mysql'
-            && $this->databaseConfiguration['driver'] != 'pdo_mysql') {
-            $this->outputLine(' only mysql is supported');
+        if (!$this->dbal->driverIsSupported($remotePersistenceConfiguration['driver'])
+            && !$this->dbal->driverIsSupported($this->databaseConfiguration['driver'])) {
+            $this->outputLine(sprintf('<error>ERROR:</error> Only pdo_pgsql and pdo_mysql drivers are supported! Remote: "%s" Local: "%s" configured.', $remotePersistenceConfiguration['driver'], $this->databaseConfiguration['driver']));
             $this->quit(1);
         }
-        if ($remotePersistenceConfiguration['charset'] != $this->databaseConfiguration['charset']) {
-            $this->outputLine(' the databases have to use the same charset');
+        if ($remotePersistenceConfiguration['driver'] !== $this->databaseConfiguration['driver']) {
+            $this->outputLine('<error>ERROR:</error> Remote and local databases must use the same driver!');
+            $this->quit(1);
+        } else if ($remotePersistenceConfiguration['charset'] != $this->databaseConfiguration['charset']) {
+            $this->outputLine(sprintf('<error>ERROR:</error> Remote and local databases must use the same charset! Remote: "%s", Local: "%s" configured.', $remotePersistenceConfiguration['charset'], $this->databaseConfiguration['charset']));
             $this->quit(1);
         }
         $this->outputLine(' - Configuration seems ok ...');
