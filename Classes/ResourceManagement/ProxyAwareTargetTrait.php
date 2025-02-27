@@ -21,6 +21,7 @@ trait ProxyAwareTargetTrait
         if ($requestHandler instanceof HttpRequestHandlerInterface) {
             $request = ActionRequest::fromHttpRequest($requestHandler->getHttpRequest());
             $this->uriBuilder->setRequest($request);
+            $this->uriBuilder->setCreateAbsoluteUri(true);
         }
         parent::initializeObject();
     }
